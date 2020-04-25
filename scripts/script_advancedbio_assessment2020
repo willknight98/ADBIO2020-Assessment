@@ -1,0 +1,197 @@
+#!/bin/bash ~
+
+#--------------------------------------------------------------------INSTALLATION OF DEPENDENCIES --------------------------------------------------------------------------------------
+
+#Creation of the required directories for this pipeline. Here the {} feature is used to create subdirectories within the directories ending in /.
+mkdir -p ADVBIO_Assessment_pipeline2020/{data/{trimmed_fastq,untrimmed_fastq,reference,aligned_data},results/{fastqc_untrimmed_reads,fastqc_trimmed_reads},logs,scripts}
+
+#'wget' is used here to pull the Miniconda installer from the internet into the current directory. chmod +x enables the file to become executable so we can run the installer. 
+wget https://repo.continuum.io/miniconda/Miniconda3-latest-Linux-x86_64.sh
+chmod +x ./Miniconda3-latest-Linux-x86_64.sh
+
+#Here we run the miniconda installer with 'bash'. "-b -p" are arguments to run the silent installation and agree to terms and conditions without external input.The ouput is saved to the home directory under a new file called minconda3. Afterwards we remove the installer to save disk space.  
+bash ~/Miniconda3-latest-Linux-x86_64.sh -b -p  ~/miniconda3
+rm ~/Miniconda3-latest-Linux-x86_64.sh 
+
+#To utilise this programme we need to move from the login terminal into an interactive session. 
+source ~/.bashrc
+
+#The following tools will be downloaded using miniconda for use during our pipeline. The 'y' argument will automatically confirm any upgrade / downgrade enabling a silent installation.
+conda install -y  samtools bwa freebayes picard bedtools trimmomatic fastqc vcflib
+
+#wget is used to grab our input files from the internet. This includes two fastq read files, the annotation (bed) file and the hg19 reference file. These are directed to speciifc folders using '--directory-prefix'.
+wget --directory-prefix=ADVBIO_Assessment_pipeline2020/data/reference/ https://s3-eu-west-1.amazonaws.com/workshopdata2017/annotation.bed http://hgdownload.cse.ucsc.edu/goldenPath/hg19/bigZips/hg19.fa.gz
+wget --directory-prefix=ADVBIO_Assessment_pipeline2020/data/untrimmed_fastq/ https://s3-eu-west-1.amazonaws.com/workshopdata2017/NGS0001.R1.fastq.qz https://s3-eu-west-1.amazonaws.com/workshopdata2017/NGS0001.R2.fastq.qz 
+
+
+
+#--------------------------------------------------------QUALITY CONTROL OF UNTRIMMED FASTQ FILES WITH FASTQC -------------------------------------------------------------------------
+
+#To run quality control we first need to rename the zipped fastq files to have the correct suffix to be recognised by fastqc.
+mv ~/ADVBIO_Assessment_pipeline2020/data/untrimmed_fastq/NGS0001.R1.fastq.qz ~/ADVBIO_Assessment_pipeline2020/data/untrimmed_fastq/NGS0001.R1.fastq.gz
+mv ~/ADVBIO_Assessment_pipeline2020/data/untrimmed_fastq/NGS0001.R2.fastq.qz ~/ADVBIO_Assessment_pipeline2020/data/untrimmed_fastq/NGS0001.R2.fastq.gz
+
+#Now we migrate to the fastq.gz files and perform FASTQC which is a quality control check. 't-4' specifies the use of 4 threads to speed up analysis, whilst *fastq.gz is a wildcard that will take any file with that suffix as its input within the specified directory. -o specifies the output directory
+cd ~/ADVBIO_Assessment_pipeline2020/data/untrimmed_fastq
+fastqc -t 4 *.fastq.gz -o ~/ADVBIO_Assessment_pipeline2020/results/fastqc_untrimmed_reads/
+
+
+
+#----------------------------------------------------------------TRIMMING POOR QUALITY READS -----------------------------------------------------------------------------------------
+
+#To remove reads of poor qulity we use the trimmomatic tool.
+
+cd ~/
+trimmomatic PE \
+-threads 4 \
+-phred33 ~/ADVBIO_Assessment_pipeline2020/data/untrimmed_fastq/NGS0001.R1.fastq.gz ~/ADVBIO_Assessment_pipeline2020/data/untrimmed_fastq/NGS0001.R2.fastq.gz \
+-baseout ~/ADVBIO_Assessment_pipeline2020/data/trimmed_fastq/NGS0001_trimmed.fastq.gz ILLUMINACLIP:miniconda3/pkgs/trimmomatic-0.39-1/share/trimmomatic-0.39-1/adapters/NexteraPE-PE.fa:2:30:10 TRAILING:25 MINLEN:50 #basout specifes the output directory as well as the template for the naming of the output files NGS0001_trimmed.fastq.gz will result in the ouput file names taking the convention of NGS_trimmed_1P.fastq.gz NGS_trimmed_2P.fastq.gz etc..
+
+
+
+#-------------------------------------------------------------QUALITY CONTROL OF TRIMMED FASTQ FILES -----------------------------------------------------------------------------------
+
+#To check the effect of trimming we will migrate to the trimmed_fastq files and run another FASTQC
+cd ~/ADVBIO_Assessment_pipeline2020/data/trimmed_fastq/
+fastqc -t 4 NGS0001_trimmed_1P.fastq.gz NGS0001_trimmed_2P.fastq.gz -o ~/ADVBIO_Assessment_pipeline2020/results/fastqc_trimmed_reads/
+
+
+
+#-------------------------------------------------------------Building the reference index for BWA -------------------------------------------------------------------------------------
+
+#Alignment to the reference genome is performed using BWA MEM  First we need to index the reference genome to allow the aligner to more quickly idenitfy the origin of a sequence within the genome
+bwa index ~/ADVBIO_Assessment_pipeline2020/data/reference/hg19.fa.gz
+
+#Then we run BWA MEM with the read group information. The arguments '-t 4 -v 1 -R' specify that we want 4 threads to be used, only errors should be ouput if necessary not warnings or debugs, then R specifies the following read group information. Here we also use the pipe function | to feed the output of alignment into a samtools converter to ensure the output is bam format and not sam format.   
+bwa mem -t 4 -v 1 -R '@RG\tID:11V6WR1.111.D1375ACXX.1.NGS0001\tSM:NGS0001\tPL:ILLUMINA\tLB:Nextera\tPU:11V6WR1' -I 250,50  ~/ADVBIO_Assessment_pipeline2020/data/reference/hg19.fa.gz ~/ADVBIO_Assessment_pipeline2020/data/trimmed_fastq/NGS0001_trimmed_1P.fastq.gz ~/ADVBIO_Assessment_pipeline2020/data/trimmed_fastq/NGS0001_trimmed_2P.fastq.gz | samtools view -bS - > ~/ADVBIO_Assessment_pipeline2020/data/aligned_data/NGS0001.bam 
+
+
+#When alignment is complete we need to sort the output file and generate an index called a .bai file. This file acts like an external table of contents, and allows programs to jump directly to specific parts of the bam file without reading through all of the sequences.
+cd ~/ADVBIO_Assessment_pipeline2020/data/aligned_data
+
+samtools sort ~/ADVBIO_Assessment_pipeline2020/data/aligned_data/NGS0001.bam > ~/ADVBIO_Assessment_pipeline2020/data/aligned_data/NGS0001_sorted.bam
+
+samtools index ~/ADVBIO_Assessment_pipeline2020/data/aligned_data/NGS0001_sorted.bam
+
+
+
+#-----------------------------------------------------------------GENERATING ALIGNMENT STATISTICS--------------------------------------------------------------------------------------
+
+#We will use Picard to mark duplicated reads. This examines aligned reads in the BAM dataset to locate PCR duplicates. Two files are produced, 1) the new BAM file with duplicate reads marked and 2) a metrics file summarising the number of duplicate reads found.
+
+picard MarkDuplicates I= ~/ADVBIO_Assessment_pipeline2020/data/aligned_data/NGS0001_sorted.bam O= ~/ADVBIO_Assessment_pipeline2020/data/aligned_data/NGS0001_sorted_marked.bam M= ~/ADVBIO_Assessment_pipeline2020/data/aligned_data/marked_dup_metrics.txt
+
+#Then we index the marked file for easier analysis
+samtools index ~/ADVBIO_Assessment_pipeline2020/data/aligned_data/NGS0001_sorted_marked.bam
+
+
+
+#---------------------------------------------------------------------QUALITY FILTERING THE BAM FILE------------------------------------------------------------------------------------
+
+#We are going to filter the reads according to the following criteria:
+#-F = only include reads with none of the FLAGS in INT present: 1796 =  The read is unmapped / The alignment or this read is not primary /  The read fails platform/vendor quality checks /  The read is a PCR or optical duplicate. -q 20 = Set Minimum MAPQ quality score : 20. 
+samtools view -F 1796 -q 20 -o ~/ADVBIO_Assessment_pipeline2020/data/aligned_data/NGS0001_sorted_filtered.bam ~/ADVBIO_Assessment_pipeline2020/data/aligned_data/NGS0001_sorted_marked.bam
+#Once again we index the output for easier analysis 
+samtools index ~/ADVBIO_Assessment_pipeline2020/data/aligned_data/NGS0001_sorted_filtered.bam
+
+
+
+#-------------------------------------------------------------------------ALIGNMENT STATISTICS------------------------------------------------------------------------------------------
+
+#Flagstst is used to tabulate the descriptive stats of our marked BAM file, enabling an easier comparison between filtered and unfiltered BAM datasets.
+samtools flagstat ~/ADVBIO_Assessment_pipeline2020/data/aligned_data/NGS0001_sorted_marked.bam > ~/ADVBIO_Assessment_pipeline2020/data/aligned_data/NGS0001_sorted_marked_flagstat.txt
+samtools flagstat ~/ADVBIO_Assessment_pipeline2020/data/aligned_data/NGS0001_sorted_filtered.bam > ~/ADVBIO_Assessment_pipeline2020/data/aligned_data/NGS0001_sorted_filtered_flagstat.txt
+
+
+#Idxstats is used to generate alignment statistics per chromosome
+samtools idxstats ~/ADVBIO_Assessment_pipeline2020/data/aligned_data/NGS0001_sorted_filtered.bam > ~/ADVBIO_Assessment_pipeline2020/data/aligned_data/NGS0001_sorted_filtered_idxstats.txt
+
+#Insertsizemetrics plots distribution of insert sizes to detemrine any bias. The ouput of this tools is a metrics.txt as well as a histogram plot pdf
+picard CollectInsertSizeMetrics I= ~/ADVBIO_Assessment_pipeline2020/data/aligned_data/NGS0001_sorted_filtered.bam O= ~/ADVBIO_Assessment_pipeline2020/data/aligned_data/NGS0001_insert_size_metrics.txt H= ~/ADVBIO_Assessment_pipeline2020/data/aligned_data/NGS0001_insert_size_histogram.pdf
+
+#Count of overlaps is used to determine the coverage across the genome
+bedtools coverage -a ~/ADVBIO_Assessment_pipeline2020/data/aligned_data/NGS0001_sorted_filtered.bam -b ~/ADVBIO_Assessment_pipeline2020/data/reference/annotation.bed > ~/ADVBIO_Assessment_pipeline2020/data/aligned_data/NGS0001_coverage.bed
+
+
+
+#---------------------------------------------------------------------------VARIANT CALLING---------------------------------------------------------------------------------------------
+
+#First we need to unzip our reference genome as requried by the freebayes tool
+zcat ~/ADVBIO_Assessment_pipeline2020/data/reference/hg19.fa.gz > ~/ADVBIO_Assessment_pipeline2020/data/reference/hg19.fa
+#Then we index the reference genome in the FASTA format as required by the freebayes tool
+samtools faidx ~/ADVBIO_Assessment_pipeline2020/data/reference/hg19.fa
+
+#Freebayes is a genetic variants detector suitable for small polymorphisms. Here we specify the input as our filtered bam file, the reference as our fasta reference genome and the output as a variant calling file .vcf
+freebayes --bam ~/ADVBIO_Assessment_pipeline2020/data/aligned_data/NGS0001_sorted_filtered.bam --fasta-reference ~/ADVBIO_Assessment_pipeline2020/data/reference/hg19.fa --vcf ~/ADVBIO_Assessment_pipeline2020/results/NGS0001.vcf
+
+#To save disk space we then zip the vcf 
+bgzip ~/ADVBIO_Assessment_pipeline2020/results/NGS0001.vcf
+
+#tabix is an indexer for vcf files to allow faster analysis
+tabix -p vcf ~/ADVBIO_Assessment_pipeline2020/results/NGS0001.vcf.gz
+
+#To filter our variants based on their quality scores we utilise this argument whereby:
+#QUAL > 1: Removes low quality calls 
+#QUAL / AO > 10:  additional contribution of each obs should be 10 log units  
+#SAF > 0 & SAR > 0: Removes alleles seen only on one strand
+#RPR > 1 & RPL > 1: Removes alleles that are only observed by reads places to the left or right 
+
+vcffilter -f "QUAL > 1 & QUAL / AO > 10 & SAF > 0 & SAR > 0 & RPR > 1 & RPL > 1" ~/ADVBIO_Assessment_pipeline2020/results/NGS0001.vcf.gz > ~/ADVBIO_Assessment_pipeline2020/results/NGS0001_filtered.vcf
+
+#The bed file annotation.bed describes the sequences and genes that have been targeted in this datasset. Using bedtools we can filter the vcf file for these regions:
+bedtools intersect -header -wa -a ~/ADVBIO_Assessment_pipeline2020/results/NGS0001_filtered.vcf -b ~/ADVBIO_Assessment_pipeline2020/data/reference/annotation.bed > ~/ADVBIO_Assessment_pipeline2020/results/NGS0001_filtered_coordinatefiltered.vcf
+
+#Once again we zip the output to save space and index the file
+bgzip ~/ADVBIO_Assessment_pipeline2020/results/NGS0001_filtered_coordinatefiltered.vcf
+
+tabix -p vcf ~/ADVBIO_Assessment_pipeline2020/results/NGS0001_filtered_coordinatefiltered.vcf.gz
+
+
+
+#----------------------------------------------------------------------VARIANT ANNOTATION WITH ANNOVAR---------------------------------------------------------------------------------
+
+#Annovar is not opensource so to install it we need to download the package with 'wget', unzip it and then download the annotation databases we require
+#To save disk space we need to remove the reference genomes and their indexes from earlier in the pipeline
+rm ~/ADVBIO_Assessment_pipeline2020/data/reference/hg19.fa ~/ADVBIO_Assessment_pipeline2020/data/reference/hg19.fa.gz.sa ~/ADVBIO_Assessment_pipeline2020/data/reference/hg19.fa.gz.bwt
+
+cd ~/
+wget http://www.openbioinformatics.org/annovar/download/0wgxR2rIVP/annovar.latest.tar.gz
+tar -zxvf annovar.latest.tar.gz
+rm annovar.latest.tar.gz
+
+#Here we migrarte to the annovar directory and download some suitable annotation databases of our choice
+cd ~/annovar
+
+./annotate_variation.pl -buildver hg19 -downdb -webfrom annovar refGene humandb
+./annotate_variation.pl -buildver hg19 -downdb -webfrom annovar ensGene humandb
+./annotate_variation.pl -buildver hg19 -downdb -webfrom annovar clinvar_20180603 humandb
+./annotate_variation.pl -buildver hg19 -downdb -webfrom annovar exac03 humandb
+./annotate_variation.pl -buildver hg19 -downdb -webfrom annovar snp137 humandb
+
+#Then we convert our filtered vcf into the required input format for annovar
+./convert2annovar.pl -format vcf4 ~/ADVBIO_Assessment_pipeline2020/results/NGS0001_filtered_coordinatefiltered.vcf.gz > ~/ADVBIO_Assessment_pipeline2020/results/NGS0001_filtered_coordinatefiltered.avinput
+
+#Variant annotation is performed by specifying the input file, the selected annotaiton databases as well as the output format as a csvfile
+./table_annovar.pl ~/ADVBIO_Assessment_pipeline2020/results/NGS0001_filtered_coordinatefiltered.avinput humandb/ -buildver hg19 -out ~/ADVBIO_Assessment_pipeline2020/results/NGS0001_filtered_coordinatefiltered -remove -protocol refGene,ensGene,clinvar_20180603,exac03,snp137, -operation g,g,f,f,f -otherinfo -nastring . -csvout
+
+
+#As requested here we filter the output csv file to just exonic snps not found in dbsnp. To do this we first use head and grab the top line of our csv file that contains the column names. This is saved separately into a new file. Then we use the awk command to extract all lines that are "exonic" but also do not contain "rs" (the dbsnp identifier). These are them ammended onto the headings file using the >> command to retain the headings alongside just the information we need. 
+
+head -n 1 ~/ADVBIO_Assessment_pipeline2020/results/NGS0001_filtered_coordinatefiltered.hg19_multianno.csv > ~/ADVBIO_Assessment_pipeline2020/results/NGS0001_exonic_dbsnp_filtered.csv
+
+awk -F, '$6 ~ /^"exonic"/ && $0 !~ /rs/' ~/ADVBIO_Assessment_pipeline2020/results/NGS0001_filtered_coordinatefiltered.hg19_multianno.csv >> ADVBIO_Assessment_pipeline2020/results/NGS0001_exonic_dbsnp_filtered.csv
+ 
+
+
+#---------------------------------------------------------------------------VARIANT ANNOTATION WITH SNPEFF------------------------------------------------------------------------------
+
+#To annotate with SNPEFF we migrate back to the home directory and grab the snpeff file from the web.
+cd ~/
+wget http://sourceforge.net/projects/snpeff/files/snpEff_latest_core.zip
+unzip snpEff_latest_core.zip
+rm snpEff_latest_core.zip
+
+#Here we utilise the built in java command to annotate with the hg19 version of the snpeff database
+cd snpEff/
+java -Xmx4g -jar ~/snpEff/snpEff.jar hg19 ~/ADVBIO_Assessment_pipeline2020/results/NGS0001_filtered_coordinatefiltered.vcf.gz > ~/ADVBIO_Assessment_pipeline2020/results/NGS0001_snpEff_annotated.vcf
+
